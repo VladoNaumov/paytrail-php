@@ -16,35 +16,19 @@
 
 ```
 
-├── public/
-│   ├── index.php          # Запуск тестового платежа
-│   ├── success.php        # Обработка успешной оплаты
-│   ├── cancel.php         # Обработка отмены
-│   ├── status.php         # Запрос статуса платежа
 ├── src/
-│   └── Paytrail.php       # Класс для работы с API
-├── storage/
-│   └── logs/
-│       └── paytrail.log   # Лог-файл Paytrail
-├── .env                   # Конфигурация (ID и ключ мерчанта)
-├── composer.json
+│   ├── App.php              # Запуск тестового платежа
+│   ├── Config.php           # Обработка успешной оплаты
+│   ├── Logger.php           # Обработка отмены
+│   ├── PaytrailSystem.php   # Запрос статуса платежа
+│   └── Views.php            # Класс для работы с API
+├── index.php          # Запуск тестового платежа
 └── README.md
 
 ````
 
-## Установка
-
-```bash
-git clone https://github.com/username/paytrail-php-demo.git
-cd paytrail-php-demo
-composer install
-````
-
 ## Конфигурация
 
-Создайте файл `.env` в корне проекта:
-
-```env
 PAYTRAIL_MERCHANT_ID=YOUR_MERCHANT_ID
 PAYTRAIL_SECRET_KEY=YOUR_SECRET_KEY
 BASE_URL=https://yourdomain.com
@@ -63,7 +47,7 @@ php -S 127.0.0.1:8000 -t public
 
 ## Логи
 
-Все действия записываются в `storage/logs/paytrail.log` с отметками времени, transactionId и статусами подписей.
+Все действия записываются в `src/paytrail.log` с отметками времени, transactionId и статусами подписей.
 
 ## Жизненный цикл платежа
 
