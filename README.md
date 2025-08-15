@@ -1,4 +1,3 @@
-Вот адаптированная версия для `README.md` под GitHub:
 
 ```markdown
 # Paytrail PHP Payment Demo
