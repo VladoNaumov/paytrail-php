@@ -269,86 +269,226 @@ final class PaytrailSystem
      */
     public function handleCallback(): void
     {
-        // 1️ Считываем "сырое" тело запроса и все заголовки
-        $rawBody = file_get_contents('php://input') ?: '';
-        $headers = $this->getAllHeadersLowercase();
+        // ====== SETTINGS ======
+        // Switch EN/RU logs here:
+        $LANG = 'en'; // 'en' or 'ru'
 
-        Logger::event('callback_received', [
-            'method'  => $_SERVER['REQUEST_METHOD'] ?? null,
-            'uri'     => $_SERVER['REQUEST_URI'] ?? null,
-            'ip'      => $_SERVER['REMOTE_ADDR'] ?? null,
-            'headers' => $headers,
-            'rawBody' => $rawBody,
-        ]);
+        // Your merchant secret:
+        $SECRET = Config::SECRET_KEY; // e.g. SAIPPUAKAUPPIAS for tests
 
-        // 2️ ПРОВЕРКА №1: Есть ли заголовок Signature
-        // Если нет — сразу 400 (Bad Request) и причина "missing_signature"
-        if (!isset($headers['signature'])) {
-            http_response_code(400);
-            echo 'Missing signature';
-            Logger::event('callback_error', ['reason' => 'missing_signature']);
-            return;
-        }
+        // Where to write logs (adjust to your logger if needed)
+        $logFile = __DIR__ . '/paytrail.log';
 
-        // 3️ Определяем алгоритм подписи (обычно sha256)
-        $algo = strtolower($headers['checkout-algorithm'] ?? 'sha256');
+        // ====== I18N MESSAGES ======
+        $MSG = [
+            'en' => [
+                'recv'     => 'callback_received',
+                'ok_post'  => 'callback_ok: post_valid_signature',
+                'ok_get'   => 'callback_ok: get_query_valid_signature (Using Plan B - GET-like callback)',
+                'err_miss' => 'callback_error: missing_signature (POST expected with Paytrail signature header)',
+                'err_inv'  => 'callback_error: invalid_signature',
+                'err_get'  => 'callback_error: get_query_invalid_signature',
+                'hint_miss'=> 'Hosting action required: ensure Paytrail POST callback with headers & raw JSON reaches PHP without being converted to GET or stripped by proxy/WAF. Preserve raw body for HMAC.',
+            ],
+            'ru' => [
+                'recv'     => 'callback_received',
+                'ok_post'  => 'callback_ok: post_valid_signature',
+                'ok_get'   => 'callback_ok: get_query_valid_signature (План B — обработка как GET-подобный callback)',
+                'err_miss' => 'callback_error: missing_signature (ожидался POST с подписью Paytrail в заголовке)',
+                'err_inv'  => 'callback_error: invalid_signature',
+                'err_get'  => 'callback_error: get_query_invalid_signature',
+                'hint_miss'=> 'Нужно действие хостинга: убедиться, что POST-callback Paytrail с заголовками и JSON телом доходит до PHP без конвертации в GET и без вырезания прокси/WAF. Сырая строка тела должна сохраняться для HMAC.',
+            ],
+        ][$LANG];
 
-        // 4️ ПРОВЕРКА №2: Есть ли вообще заголовки checkout-* (служебные поля Paytrail)
-        // Если их нет — 400 и причина "missing_checkout_headers"
-        $checkoutHeaders = [];
-        foreach ($headers as $k => $v) {
-            if (str_starts_with($k, 'checkout-')) {
-                $checkoutHeaders[$k] = $v;
+        // ====== HELPERS ======
+        $now = gmdate('Y-m-d\TH:i:s\Z');
+
+        $log = function(string $event, array $payload = []) use ($logFile, $now) {
+            $line = sprintf("[%s] %s %s\n", $now, $event, json_encode($payload, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
+            error_log($line, 3, $logFile);
+        };
+
+        $getAllHeadersLower = function(): array {
+            $h = function_exists('getallheaders') ? getallheaders() : [];
+            if (!$h) {
+                // Fallback for FastCGI/NGINX
+                foreach ($_SERVER as $k => $v) {
+                    if (strpos($k, 'HTTP_') === 0) {
+                        $name = strtolower(str_replace('_', '-', substr($k, 5)));
+                        $h[$name] = $v;
+                    }
+                }
             }
-        }
-        if (!$checkoutHeaders) {
-            http_response_code(400);
-            echo 'Missing checkout-* headers';
-            Logger::event('callback_error', [
-                'reason' => 'missing_signature',
-                'hint'   => 'Paytrail не прислал заголовок "Signature". Проверьте, что callback-запрос приходит напрямую от Paytrail и что сервер не удаляет этот заголовок (например, прокси или Nginx).',
-                'received_headers' => array_keys($headers) // чтобы видеть, какие заголовки вообще пришли
-            ]);
-            return;
-        }
+            // normalize to lower-case keys
+            $norm = [];
+            foreach ($h as $k => $v) { $norm[strtolower($k)] = $v; }
+            return $norm;
+        };
 
-        // 5️ Готовим строку для подписи: сортируем checkout-* + тело запроса
-        ksort($checkoutHeaders, SORT_STRING);
-        $lines = [];
-        foreach ($checkoutHeaders as $k => $v) {
-            $lines[] = $k . ':' . $v;
-        }
-        $stringToSign = implode("\n", $lines) . "\n" . $rawBody;
+        $buildCanonicalForPost = function(array $headers, string $rawBody): string {
+            // Include ONLY headers starting with "checkout-"
+            $chk = [];
+            foreach ($headers as $k => $v) {
+                if (strpos($k, 'checkout-') === 0) $chk[$k] = $v;
+            }
+            ksort($chk, SORT_STRING);
+            $pieces = [];
+            foreach ($chk as $v) { $pieces[] = (string)$v; }
+            // Join with "\n" and append raw body
+            return implode("\n", $pieces) . $rawBody;
+        };
 
-        // 6️ Считаем свою подпись и сравниваем с переданной
-        $calc = hash_hmac($algo, $stringToSign, Config::SECRET_KEY);
-        $sig  = strtolower($headers['signature']);
-        $valid = hash_equals($calc, $sig);
+        $buildCanonicalForGet = function(array $query): string {
+            // Use ONLY query params starting with "checkout-", exclude "signature"
+            $chk = [];
+            foreach ($query as $k => $v) {
+                if ($k === 'signature') continue;
+                if (strpos($k, 'checkout-') === 0) $chk[$k] = $v;
+            }
+            ksort($chk, SORT_STRING);
+            $pieces = [];
+            foreach ($chk as $v) { $pieces[] = (string)$v; }
+            // For GET the body is empty in the signature input
+            return implode("\n", $pieces);
+        };
 
-        // 7️ ПРОВЕРКА №3: Совпадает ли подпись
-        // Если нет — 400 и причина "Invalid signature"
-        Logger::event('callback_signature_check', [
-            'algorithm' => $algo,
-            'valid' => $valid,
-            'checkout-transaction-id' => $headers['checkout-transaction-id'] ?? null,
-            'checkout-status' => $headers['checkout-status'] ?? null,
+        $verifyHmac = function(string $canonical, string $provided, string $secret) {
+            $calc = hash_hmac('sha256', $canonical, $secret);
+            return hash_equals(strtolower($calc), strtolower($provided ?? ''));
+        };
+
+        // ====== COLLECT REQUEST INFO ======
+        $method      = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+        $uri         = $_SERVER['REQUEST_URI'] ?? '';
+        $remoteIp    = $_SERVER['REMOTE_ADDR'] ?? '';
+        $userAgent   = $_SERVER['HTTP_USER_AGENT'] ?? '';
+        $headers     = $getAllHeadersLower();
+        $requestId   = $headers['request-id'] ?? ($headers['x-request-id'] ?? '');
+        $rawBody     = file_get_contents('php://input') ?: '';
+        $query       = $_GET ?? [];
+
+        // Pre-extract common fields for logging (best-effort)
+        $tx          = $query['checkout-transaction-id'] ?? '';
+        $reference   = $query['checkout-reference']      ?? '';
+        $status      = $query['checkout-status']         ?? '';
+
+        $log($MSG['recv'], [
+            'method'     => $method,
+            'uri'        => $uri,
+            'remote_ip'  => $remoteIp,
+            'user_agent' => $userAgent,
+            'request_id' => $requestId,
         ]);
-        if (!$valid) {
-            http_response_code(400);
-            echo 'Invalid signature';
+
+        // ====== ROUTING BY METHOD ======
+        if (strtoupper($method) === 'POST') {
+            $sig = $headers['signature'] ?? null;
+
+            if (!$sig) {
+                // HOSTER ACTION: signature header is missing (most frequent proxy/WAF issue)
+                http_response_code(400);
+                $log($MSG['err_miss'], [
+                    'method'     => 'POST',
+                    'uri'        => $uri,
+                    'remote_ip'  => $remoteIp,
+                    'request_id' => $requestId,
+                    'hint'       => $MSG['hint_miss'],
+                ]);
+                echo 'ERR: missing signature';
+                return;
+            }
+
+            $canonical = $buildCanonicalForPost($headers, $rawBody);
+            $valid     = $verifyHmac($canonical, $sig, $SECRET);
+
+            if (!$valid) {
+                http_response_code(400);
+                $log($MSG['err_inv'], [
+                    'method'     => 'POST',
+                    'uri'        => $uri,
+                    'remote_ip'  => $remoteIp,
+                    'request_id' => $requestId,
+                ]);
+                echo 'ERR: invalid signature';
+                return;
+            }
+
+            // POST & signature OK → parse JSON and ack
+            $json = json_decode($rawBody, true) ?: [];
+            // Try to extract common fields (best-effort)
+            $tx        = $json['transactionId'] ?? ($json['checkout-transaction-id'] ?? $tx);
+            $reference = $json['reference']     ?? ($json['checkout-reference'] ?? $reference);
+            $status    = $json['status']        ?? ($json['checkout-status'] ?? $status);
+            $amount    = $json['amount']        ?? ($json['checkout-amount'] ?? null);
+
+            $log($MSG['ok_post'], [
+                'tx'        => $tx,
+                'reference' => $reference,
+                'status'    => $status,
+                'amount'    => $amount,
+            ]);
+
+            // TODO: idempotent order update by $reference/$tx/$status
+            http_response_code(200);
+            echo 'OK';
             return;
         }
 
-        // 8. Если тело — JSON, логируем его
-        $json = json_decode($rawBody, true);
-        if (json_last_error() === JSON_ERROR_NONE) {
-            Logger::event('callback_parsed', ['json' => $json]);
-            // Здесь можно обновить заказ в БД
+        // Fallback: GET + query signature (Plan B)
+        if (strtoupper($method) === 'GET') {
+            $sig = $query['signature'] ?? null;
+            if (!$sig) {
+                http_response_code(400);
+                $log($MSG['err_get'], [
+                    'method'     => 'GET',
+                    'uri'        => $uri,
+                    'remote_ip'  => $remoteIp,
+                    'request_id' => $requestId,
+                    'reason'     => 'no signature in query',
+                ]);
+                echo 'ERR: missing signature';
+                return;
+            }
+
+            $canonical = $buildCanonicalForGet($query);
+            $valid     = $verifyHmac($canonical, $sig, $SECRET);
+
+            if (!$valid) {
+                http_response_code(400);
+                $log($MSG['err_get'], [
+                    'method'     => 'GET',
+                    'uri'        => $uri,
+                    'remote_ip'  => $remoteIp,
+                    'request_id' => $requestId,
+                    'reason'     => 'invalid signature',
+                ]);
+                echo 'ERR: invalid signature';
+                return;
+            }
+
+            // GET & signature OK → warn that this is a fallback path (Plan B)
+            $tx        = $query['checkout-transaction-id'] ?? $tx;
+            $reference = $query['checkout-reference']      ?? $reference;
+            $status    = $query['checkout-status']         ?? $status;
+            $amount    = $query['checkout-amount']         ?? null;
+
+            $log($MSG['ok_get'], [
+                'tx'        => $tx,
+                'reference' => $reference,
+                'status'    => $status,
+                'amount'    => $amount,
+            ]);
+
+            // TODO: idempotent order update by $reference/$tx/$status
+            http_response_code(200);
+            echo 'OK';
+            return;
         }
 
-        // 9️ Всё ок — отвечаем Paytrail'у "OK"
-        http_response_code(200);
-        echo 'OK';
+        // Any other method → 405
+        http_response_code(405);
+        echo 'Method Not Allowed';
     }
 
 

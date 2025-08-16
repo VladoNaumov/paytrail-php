@@ -1,9 +1,10 @@
 <?php
 declare(strict_types=1);
 
+// ── ВАШ ИСХОДНЫЙ КОД БЕЗ ИЗМЕНЕНИЙ ──
+
 // 🔧 ВРЕМЕННО: отладка заголовков на реальном пути.
 // УДАЛИ или отключи после тестов!
-
 /*
 if (isset($_GET['__debug']) && $_GET['__debug'] === 'headers') {
     $headers = function_exists('getallheaders') ? getallheaders() : [];
@@ -29,4 +30,10 @@ require_once __DIR__ . '/src/Views.php';
 require_once __DIR__ . '/src/PaytrailSystem.php';
 require_once __DIR__ . '/src/App.php';
 
-App::run();
+// ── ЕДИНСТВЕННОЕ ДОБАВЛЕНИЕ: мягкий try/catch вокруг App::run() ──
+try {
+    App::run();
+} catch (Throwable $e) {
+    // Пробросим в handler выше (он уже решит, что показать)
+    throw $e;
+}
