@@ -1,20 +1,22 @@
 <?php
 declare(strict_types=1);
 
+namespace App;
+
 /**
  * ООП-версия Paytrail демо-интеграции (один файл).
  * Слои:
- *  - Config:   все настройки
+ *  - Config:   настройки
  *  - Logger:   логи (json-строки)
- *  - Views:    простые HTML-страницы для success/cancel
- *  - PaytrailSystem: вся логика (создать платёж, подписи, callback)
+ *  - Views:    HTML-страницы для success/cancel
+ *  - PaytrailSystem: логика (создать платёж, подписи, callback)
  *  - App:      маршрутизация экшенов
  *
  * Тестовые креды Paytrail (Normal merchant):
  *   MERCHANT_ID=375917
  *   SECRET_KEY=SAIPPUAKAUPPIAS
  *
- * ВАЖНО: Для server-to-server callback сервер/прокси должен пропускать заголовки:
+ * ВАЖНО: для server-to-server callback сервер/прокси должен пропускать заголовки:
  * signature, checkout-*, иначе handleCallback увидит "missing_signature".
  */
 
@@ -23,29 +25,22 @@ declare(strict_types=1);
  * ========================= */
 final class Config
 {
-    // --- Креды Paytrail (тест) ---
     public const MERCHANT_ID       = 375917;
     public const SECRET_KEY        = 'SAIPPUAKAUPPIAS';
 
-    // --- API эндпоинт ---
     public const PAYTRAIL_ENDPOINT = 'https://services.paytrail.com/payments';
 
-    // --- Базовый URL (папка, где лежит этот index.php) ---
-    // Рекомендуется на проде жестко задавать:
-    public const FORCE_BASE_URL    = 'https://www.encanta.fi/demo'; // оставь пустым '', если хочешь авто-вычисление
+    // Жёстко задать базовый URL (или оставить '' и собрать автоматически)
+    public const FORCE_BASE_URL    = 'https://www.encanta.fi/payment';
 
-    // Если FORCE_BASE_URL пуст, соберём из домена/пути:
     public const YOUR_DOMAIN       = 'www.encanta.fi';
-    public const APP_PATH          = '/demo'; // '' если в корне
+    public const APP_PATH          = '/payment';
 
-    // --- Куда ведёт кнопка "Назад в магазин" ---
     public const BACK_URL          = 'https://encanta.fi/';
 
-    // --- Логи ---
     public const LOG_FILE          = __DIR__ . '/paytrail.log';
     public const DEBUG_LOGS        = true;
 
-    // Вспомогательные: base_url и self_url
     public static function baseUrl(): string
     {
         if (self::FORCE_BASE_URL !== '') {
@@ -72,10 +67,11 @@ final class Logger
     /** Пишем строку JSON в лог (UTC ISO8601). Никогда не логируем секретный ключ. */
     public static function event(string $event, array $data = []): void
     {
-        if (!App\Config::DEBUG_LOGS) return;
-        if (isset($data['SECRET_KEY'])) unset($data['SECRET_KEY']);
-        $line = '[' . gmdate('Y-m-d\TH:i:s\Z') . '] ' . $event . ' ' . json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        @file_put_contents(App\Config::LOG_FILE, $line . PHP_EOL, FILE_APPEND);
+        if (!Config::DEBUG_LOGS) return;
+        unset($data['SECRET_KEY']);
+        $line = '[' . gmdate('Y-m-d\TH:i:s\Z') . '] ' . $event . ' ' .
+            json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        @file_put_contents(Config::LOG_FILE, $line . PHP_EOL, FILE_APPEND);
     }
 }
 
@@ -84,13 +80,11 @@ final class Logger
  * ========================= */
 final class Views
 {
-    /** Экранировать строку для HTML */
     public static function e(string $s): string
     {
         return htmlspecialchars($s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
     }
 
-    /** Страница результата (success/cancel) с деталями и кнопками */
     public static function resultPage(string $action, array $data): void
     {
         $title = $action === 'success' ? 'Оплата успешно завершена' : 'Оплата отменена';
@@ -131,10 +125,10 @@ final class Views
 
         echo '<div>';
         if ($action === 'success') {
-            echo '<a class="btn btn-primary" href="' . self::e(App\Config::BACK_URL) . '">← Назад в магазин</a>';
+            echo '<a class="btn btn-primary" href="' . self::e(Config::BACK_URL) . '">← Назад в магазин</a>';
         } else {
-            echo '<a class="btn" href="' . self::e(App\Config::baseUrl()) . '">Попробовать оплатить снова</a>';
-            echo '<a class="btn" href="' . self::e(App\Config::BACK_URL) . '">← Назад в магазин</a>';
+            echo '<a class="btn" href="' . self::e(Config::baseUrl()) . '">Попробовать оплатить снова</a>';
+            echo '<a class="btn" href="' . self::e(Config::BACK_URL) . '">← Назад в магазин</a>';
         }
         echo '</div>';
 
@@ -147,51 +141,56 @@ final class Views
  * ========================= */
 final class PaytrailSystem
 {
-    /* -------- Создание платежа -------- */
+    /**
+     * Создаёт платёж в Paytrail и перенаправляет пользователя на страницу оплаты.
+     * Главный идентификатор заказа у продавца — 'stamp'. Paytrail может изменить 'reference' на числовой.
+     */
     public function createAndRedirect(): void
     {
-        // Минимальный заказ (демо)
+        // 🔑 Главный ID заказа у продавца
+        $stamp = 'order-' . time();
+
         $order = [
-            'reference' => 'order-' . time(),
-            'amount'    => 1590, // 15.90 € в центах
-            'items'     => [[
-                'unitPrice'     => 1590,
-                'units'         => 1,
+            'reference' => $stamp,   // можно оставить как есть; Paytrail всё равно может заменить reference
+            'amount' => 1590,
+            'items' => [[
+                'unitPrice' => 1590,
+                'units' => 1,
                 'vatPercentage' => 24,
-                'productCode'   => 'SKU-001',
-                'description'   => 'Test product',
-                'category'      => 'General',
+                'productCode' => 'SKU-001',
+                'description' => 'Test product',
+                'category' => 'General',
             ]],
             'customer' => [
-                'email'     => 'test@example.com',
+                'email' => 'test@example.com',
                 'firstName' => 'Test',
-                'lastName'  => 'User',
-                'phone'     => '+358501234567',
+                'lastName' => 'User',
+                'phone' => '+358501234567',
             ],
         ];
 
         $bodyArr = [
-            'stamp'        => 'order-' . time(),
-            'reference'    => $order['reference'],
-            'amount'       => $order['amount'],
-            'currency'     => 'EUR',
-            'language'     => 'FI',
-            'items'        => $order['items'],
-            'customer'     => $order['customer'],
+            'stamp' => $stamp,                 // 🔑 используем единый stamp
+            'reference' => $order['reference'],
+            'amount' => $order['amount'],
+            'currency' => 'EUR',
+            'language' => 'FI',
+            'items' => $order['items'],
+            'customer' => $order['customer'],
             'redirectUrls' => [
-                'success' => App\Config::selfUrl('action=success'),
-                'cancel'  => App\Config::selfUrl('action=cancel'),
+                'success' => Config::selfUrl('action=success'),
+                'cancel'  => Config::selfUrl('action=cancel'),
             ],
             'callbackUrls' => [
-                'success' => App\Config::selfUrl('action=callback'),
-                'cancel'  => App\Config::selfUrl('action=callback'),
+                'success' => Config::selfUrl('action=callback'),
+                'cancel'  => Config::selfUrl('action=callback'),
             ],
         ];
         $body = json_encode($bodyArr, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
-        // Заголовки для подписи
+        // Заголовки для подписи запроса
         $headersForSign = [
-            'checkout-account'   => (string)App\Config::MERCHANT_ID,
+            'checkout-account'   => (string)Config::MERCHANT_ID,
             'checkout-algorithm' => 'sha256',
             'checkout-method'    => 'POST',
             'checkout-nonce'     => bin2hex(random_bytes(16)),
@@ -199,69 +198,71 @@ final class PaytrailSystem
         ];
         ksort($headersForSign, SORT_STRING);
 
-        // Каноническая строка и HMAC подпись (сырое тело в конце)
+        // Каноническая строка: "k:v\n..." + "\n" + raw body
         $lines = [];
-        foreach ($headersForSign as $k => $v) { $lines[] = "$k:$v"; }
+        foreach ($headersForSign as $k => $v) $lines[] = "$k:$v";
         $stringToSign = implode("\n", $lines) . "\n" . $body;
-        $signature    = hash_hmac('sha256', $stringToSign, App\Config::SECRET_KEY);
 
-        // HTTP-заголовки запроса
+        $signature = hash_hmac('sha256', $stringToSign, Config::SECRET_KEY);
+
         $httpHeaders = array_merge(
             ['Content-Type: application/json; charset=utf-8'],
-            array_map(fn($k,$v) => "$k: $v", array_keys($headersForSign), $headersForSign),
+            array_map(fn($k, $v) => "$k: $v", array_keys($headersForSign), $headersForSign),
             ["signature: $signature"]
         );
 
-        // Лог исходящего запроса
-        App\Logger::event('payment_create_request', [
-            'endpoint'     => App\Config::PAYTRAIL_ENDPOINT,
-            'headers'      => $headersForSign,
-            'has_signature'=> true,
-            'body'         => $bodyArr,
+        Logger::event('payment_create_request', [
+            'endpoint' => Config::PAYTRAIL_ENDPOINT,
+            'headers' => $headersForSign,
+            'has_signature' => true,
+            'body' => $bodyArr,
             'redirectUrls' => $bodyArr['redirectUrls'],
             'callbackUrls' => $bodyArr['callbackUrls'],
         ]);
 
-        // Отправка
-        $ch = curl_init(App\Config::PAYTRAIL_ENDPOINT);
+        // POST на Paytrail
+        $ch = curl_init(Config::PAYTRAIL_ENDPOINT);
         curl_setopt_array($ch, [
-            CURLOPT_POST           => true,
-            CURLOPT_POSTFIELDS     => $body,
-            CURLOPT_HTTPHEADER     => $httpHeaders,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $body,
+            CURLOPT_HTTPHEADER => $httpHeaders,
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HEADER         => false,
+            CURLOPT_HEADER => false,
         ]);
         $respBody = curl_exec($ch);
-        $code     = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlErr  = $respBody === false ? curl_error($ch) : null;
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlErr = $respBody === false ? curl_error($ch) : null;
         curl_close($ch);
 
         if ($respBody === false) {
-            App\Logger::event('payment_create_curl_error', ['error' => $curlErr]);
+            Logger::event('payment_create_curl_error', ['error' => $curlErr]);
             http_response_code(500);
-            die("cURL error: " . App\Views::e((string)$curlErr));
+            die("cURL error: " . Views::e((string)$curlErr));
         }
 
         $decoded = json_decode($respBody, true);
-        $isJson  = json_last_error() === JSON_ERROR_NONE;
-        App\Logger::event('payment_create_response', [
+        $isJson = json_last_error() === JSON_ERROR_NONE;
+
+        // Сохраним transactionId + stamp для трассировки
+        $transactionId = $isJson ? ($decoded['transactionId'] ?? null) : null;
+
+        Logger::event('payment_create_response', [
             'http_code' => $code,
+            'transactionId' => $transactionId,   // ⬅ фиксируем
+            'stamp' => $stamp,                   // ⬅ и свой ключ
             'body_raw'  => $isJson ? null : $respBody,
             'body_json' => $isJson ? $decoded : null
         ]);
 
         if ($code !== 201) {
             http_response_code($code);
-            die("Paytrail error ($code): " . App\Views::e($respBody));
+            die("Paytrail error ($code): " . Views::e($respBody));
         }
 
-        // Ссылка платёжной страницы (официально: href)
-        $href = $decoded['href'] ?? null;
-        if (!$href && !empty($decoded['providers'][0]['url'])) {
-            $href = $decoded['providers'][0]['url']; // fallback
-        }
+        // Ссылка на платёжную страницу
+        $href = $decoded['href'] ?? ($decoded['providers'][0]['url'] ?? null);
 
-        App\Logger::event('payment_redirect', ['href' => $href]);
+        Logger::event('payment_redirect', ['href' => $href]);
 
         if ($href) {
             header('Location: ' . $href);
@@ -272,10 +273,14 @@ final class PaytrailSystem
         die('Нет ссылки на оплату (href) и нет доступных методов');
     }
 
-    /* -------- Проверка подписи в redirect (success/cancel) -------- */
+    /**
+     * Проверяет подпись параметров, пришедших в redirect (после возврата пользователя из Paytrail).
+     * В redirect подписываются только параметры checkout-* (без тела).
+     */
     public function verifyRedirectSignature(array $query): bool
     {
         if (empty($query['signature'])) return false;
+
         $chk = [];
         foreach ($query as $k => $v) {
             $lk = strtolower((string)$k);
@@ -284,124 +289,252 @@ final class PaytrailSystem
             }
         }
         if (empty($chk)) return false;
+
         ksort($chk, SORT_STRING);
         $lines = [];
-        foreach ($chk as $k => $v) { $lines[] = $k . ':' . $v; }
-        $stringToSign = implode("\n", $lines) . "\n"; // на redirect тело пустое
-        $calc = hash_hmac('sha256', $stringToSign, App\Config::SECRET_KEY);
+        foreach ($chk as $k => $v) $lines[] = $k . ':' . $v;
+        $stringToSign = implode("\n", $lines) . "\n"; // redirect без body
+
+        $calc = hash_hmac('sha256', $stringToSign, Config::SECRET_KEY);
         return hash_equals($calc, strtolower((string)$query['signature']));
     }
 
-    /* -------- Страница результатов -------- */
+    /**
+     * Рендерит страницу "успех" или "отмена" после возврата с Paytrail.
+     * Опираемся на stamp + transactionId (reference может отличаться у банковских провайдеров).
+     */
     public function renderSuccessOrCancel(string $action): void
     {
-        $ok        = $this->verifyRedirectSignature($_GET);
-        $tx        = $_GET['checkout-transaction-id'] ?? null;
-        $status    = $_GET['checkout-status'] ?? null;   // ok/fail
-        $provider  = $_GET['checkout-provider'] ?? null; // напр. osuuspankki
-        $amount    = $_GET['checkout-amount'] ?? null;   // в центах
-        $reference = $_GET['checkout-reference'] ?? null;
-        $stamp     = $_GET['checkout-stamp'] ?? null;
+        $ok = $this->verifyRedirectSignature($_GET);
+        $tx = $_GET['checkout-transaction-id'] ?? null;   // transactionId
+        $status = $_GET['checkout-status'] ?? null;
+        $provider = $_GET['checkout-provider'] ?? null;
+        $amount = $_GET['checkout-amount'] ?? null;
+        $stamp = $_GET['checkout-stamp'] ?? null;         // 🔑 главный идентификатор у продавца
+        $reference = $_GET['checkout-reference'] ?? null; // ⚠ справочный, может отличаться
 
-        App\Logger::event('redirect_' . $action, [
-            'url'          => (string)($_SERVER['REQUEST_URI'] ?? ''),
+        Logger::event('redirect_' . $action, [
+            'url' => (string)($_SERVER['REQUEST_URI'] ?? ''),
             'signature_ok' => $ok,
-            'status'       => $status,
-            'provider'     => $provider,
-            'amount'       => $amount,
-            'reference'    => $reference,
-            'stamp'        => $stamp,
-            'tx'           => $tx,
+            'status' => $status,
+            'provider' => $provider,
+            'amount' => $amount,
+            'stamp' => $stamp,
+            'reference' => $reference,
+            'tx' => $tx,
         ]);
 
         $note = $action === 'success'
             ? ($ok ? 'Подпись валидна. Спасибо за оплату!' : 'Внимание: подпись не подтверждена.')
             : ($ok ? 'Подпись валидна, статус fail/отмена.' : 'Внимание: подпись не подтверждена.');
 
-        App\Views::resultPage($action, [
-            'note'      => $note,
-            'tx'        => (string)$tx,
-            'status'    => (string)$status,
-            'provider'  => (string)$provider,
-            'amount'    => $amount,
+        Views::resultPage($action, [
+            'note' => $note,
+            'tx' => (string)$tx,
+            'status' => (string)$status,
+            'provider' => (string)$provider,
+            'amount' => $amount,
             'reference' => (string)$reference,
-            'stamp'     => (string)$stamp,
+            'stamp' => (string)$stamp,
         ]);
     }
 
-    /* -------- Обработка server-to-server callback -------- */
+    /**
+     * Обрабатывает server-to-server callback от Paytrail.
+     * Идемпотентная заготовка: повторные уведомления не должны повторно "проводить" заказ.
+     */
     public function handleCallback(): void
     {
-        $rawBody = file_get_contents('php://input') ?: '';
-        $headers = $this->getAllHeadersLowercase();
+        $SECRET         = Config::SECRET_KEY;
 
-        App\Logger::event('callback_received', [
-            'headers' => $headers,
-            'rawBody' => $rawBody,
-        ]);
+        // Основной лог + отдельные логи для предупреждений/ошибок
+        $mainLogFile    = __DIR__ . '/paytrail.log';
+        $warnLogFile    = __DIR__ . '/paytrail_warn.log';
+        $errorLogFile   = __DIR__ . '/paytrail_error.log';
 
-        if (!isset($headers['signature'])) {
-            http_response_code(400);
-            echo 'Missing signature';
-            App\Logger::event('callback_error', ['reason' => 'missing_signature']);
-            return;
+        $now = gmdate('Y-m-d\TH:i:s\Z');
+
+        $writeLine = function (string $file, string $event, array $payload) use ($now) {
+            $line = sprintf("[%s] %s %s\n", $now, $event, json_encode($payload, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
+            error_log($line, 3, $file);
+        };
+
+        // Пишем в главный лог всегда; при warn/error дублируем в отдельные файлы
+        $log = function (array $payload) use ($writeLine, $mainLogFile, $warnLogFile, $errorLogFile) {
+            $status = $payload['status'] ?? 'ok';
+            $writeLine($mainLogFile, 'callback_event', $payload);
+            if ($status === 'warn')  { $writeLine($warnLogFile,  'callback_event', $payload); }
+            if ($status === 'error') { $writeLine($errorLogFile, 'callback_event', $payload); }
+        };
+
+        // ---- Сбор заголовков (в нижнем регистре) ----
+        $headers = [];
+        if (function_exists('getallheaders')) {
+            foreach (getallheaders() as $k => $v) { $headers[strtolower($k)] = $v; }
         }
-        $algo = strtolower($headers['checkout-algorithm'] ?? 'sha256');
-
-        // Собираем checkout-* заголовки
-        $checkoutHeaders = [];
-        foreach ($headers as $k => $v) {
-            if (str_starts_with($k, 'checkout-')) {
-                $checkoutHeaders[$k] = $v;
+        // Fallback на $_SERVER
+        foreach ($_SERVER as $k => $v) {
+            if (strpos($k, 'HTTP_') === 0) {
+                $name = strtolower(str_replace('_', '-', substr($k, 5)));
+                $headers[$name] = $v;
             }
         }
-        if (!$checkoutHeaders) {
+
+        // ---- Контекст запроса ----
+        $method     = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+        $uri        = $_SERVER['REQUEST_URI'] ?? '';
+        $remoteIp   = $_SERVER['REMOTE_ADDR'] ?? '';
+        $userAgent  = $_SERVER['HTTP_USER_AGENT'] ?? '';
+        $requestId  = $headers['request-id'] ?? ($headers['x-request-id'] ?? '');
+        $rawBody    = file_get_contents('php://input') ?: '';
+        $contentLen = (int)($_SERVER['CONTENT_LENGTH'] ?? 0);
+        $query      = $_GET ?? [];
+
+        $sigHead    = $headers['signature'] ?? null;
+        $sigQuery   = $query['signature'] ?? null;
+
+        // ---- Диагностика симптомов прокси/WAF ----
+        $reasons = [];
+        if (strtoupper($method) !== 'POST')                   $reasons[] = 'unexpected_method (expected POST)';
+        if (!$sigHead)                                        $reasons[] = 'missing_signature_header';
+        if (!array_filter(array_keys($headers), fn($k)=>strpos((string)$k,'checkout-')===0))
+            $reasons[] = 'missing_checkout_headers';
+        if ($rawBody === '' && strtoupper($method)==='POST' && $contentLen===0)
+            $reasons[] = 'empty_raw_body (php://input)';
+        if ($sigQuery || array_filter(array_keys($query), fn($k)=>strpos((string)$k,'checkout-')===0))
+            $reasons[] = 'callback_parameters_in_query';
+
+        // ---- POST с подписью в заголовке (норма) ----
+        if (strtoupper($method) === 'POST' && $sigHead) {
+            // Canonical = значения ВСЕХ checkout-* заголовков (по алфавиту) + rawBody
+            $canonHeaders = [];
+            foreach ($headers as $k => $v) {
+                if (strpos($k, 'checkout-') === 0) { $canonHeaders[$k] = $v; }
+            }
+            ksort($canonHeaders, SORT_STRING);
+            $canonical = implode("\n", array_values($canonHeaders)) . $rawBody;
+
+            $calc  = hash_hmac('sha256', $canonical, $SECRET);
+            $valid = hash_equals(strtolower($calc), strtolower((string)$sigHead));
+
+            if ($valid) {
+                $json  = json_decode($rawBody, true) ?: [];
+                $tx    = $json['transactionId'] ?? ($json['checkout-transaction-id'] ?? '');
+                $stamp = $json['stamp']         ?? ($json['checkout-stamp'] ?? '');
+                $amt   = $json['amount']        ?? ($json['checkout-amount'] ?? null);
+
+                // Тут ваша идемпотентная обработка заказа:
+                // if (!OrderRepository::alreadyHandled($stamp, $tx)) {
+                //     OrderRepository::markHandled($stamp, $tx, ($json['status'] ?? ''), (int)$amt);
+                // }
+
+                $log([
+                    'status'     => empty($reasons) ? 'ok' : 'warn', // если были симптомы, пометим warn
+                    'method'     => 'POST',
+                    'uri'        => $uri,
+                    'remote_ip'  => $remoteIp,
+                    'user_agent' => $userAgent,
+                    'request_id' => $requestId,
+                    'msg'        => 'POST valid signature',
+                    'tx'         => $tx,
+                    'stamp'      => $stamp,
+                    'amount'     => $amt,
+                    'reasons'    => $reasons ?: null,
+                ]);
+
+                http_response_code(200);
+                echo 'OK';
+                return;
+            }
+
+            // Подпись не валидна
+            $log([
+                'status'     => 'error',
+                'method'     => 'POST',
+                'uri'        => $uri,
+                'remote_ip'  => $remoteIp,
+                'user_agent' => $userAgent,
+                'request_id' => $requestId,
+                'reason'     => 'invalid signature',
+                'msg'        => 'Signature mismatch – HMAC validation failed',
+                'reasons'    => $reasons ?: null,
+            ]);
             http_response_code(400);
-            echo 'Missing checkout-* headers';
-            App\Logger::event('callback_error', ['reason' => 'missing_checkout_headers']);
+            echo 'ERR';
             return;
         }
 
-        ksort($checkoutHeaders, SORT_STRING);
-        $lines = [];
-        foreach ($checkoutHeaders as $k => $v) { $lines[] = $k . ':' . $v; }
-        $stringToSign = implode("\n", $lines) . "\n" . $rawBody;
+        // ---- GET fallback (не норма, но поддерживаем) ----
+        if (strtoupper($method) === 'GET' && $sigQuery) {
+            $canonParts = [];
+            foreach ($query as $k => $v) {
+                if ($k === 'signature') continue;
+                if (strpos($k, 'checkout-') === 0) { $canonParts[$k] = $v; }
+            }
+            ksort($canonParts, SORT_STRING);
+            $canonical = implode("\n", $canonParts);
 
-        $calc = hash_hmac($algo, $stringToSign, App\Config::SECRET_KEY);
-        $sig  = strtolower($headers['signature']);
-        $valid = hash_equals($calc, $sig);
+            $calc  = hash_hmac('sha256', $canonical, $SECRET);
+            $valid = hash_equals(strtolower($calc), strtolower((string)$sigQuery));
 
-        App\Logger::event('callback_signature_check', [
-            'algorithm' => $algo,
-            'valid'     => $valid,
-            'checkout-transaction-id' => $headers['checkout-transaction-id'] ?? null,
-            'checkout-status'         => $headers['checkout-status'] ?? null,
+            if ($valid) {
+                // GET-ветка всегда WARN, т.к. ожидаем POST
+                $log([
+                    'status'     => 'warn',
+                    'method'     => 'GET',
+                    'uri'        => $uri,
+                    'remote_ip'  => $remoteIp,
+                    'user_agent' => $userAgent,
+                    'request_id' => $requestId,
+                    'msg'        => 'Proxy/WAF suspected – using GET fallback',
+                    'reasons'    => array_unique(array_merge($reasons, ['using_get_fallback'])),
+                ]);
+                http_response_code(200);
+                echo 'OK';
+                return;
+            }
+
+            $log([
+                'status'     => 'error',
+                'method'     => 'GET',
+                'uri'        => $uri,
+                'remote_ip'  => $remoteIp,
+                'user_agent' => $userAgent,
+                'request_id' => $requestId,
+                'reason'     => 'invalid signature',
+                'msg'        => 'GET signature check failed',
+                'reasons'    => $reasons ?: null,
+            ]);
+            http_response_code(400);
+            echo 'ERR';
+            return;
+        }
+
+        // ---- Иное: неподдерживаемый формат / нет подписи ----
+        $log([
+            'status'     => 'error',
+            'method'     => $method,
+            'uri'        => $uri,
+            'remote_ip'  => $remoteIp,
+            'user_agent' => $userAgent,
+            'request_id' => $requestId,
+            'reason'     => 'unsupported method or missing signature',
+            'msg'        => 'Unexpected callback format',
+            'reasons'    => $reasons ?: null,
         ]);
-
-        if (!$valid) {
-            http_response_code(400);
-            echo 'Invalid signature';
-            return;
-        }
-
-        // Если тело — JSON, логируем его поля
-        $json = json_decode($rawBody, true);
-        if (json_last_error() === JSON_ERROR_NONE) {
-            App\Logger::event('callback_parsed', ['json' => $json]);
-            // здесь можно обновить заказ в БД по статусу/сумме/провайдеру и т.п.
-        }
-
-        http_response_code(200);
-        echo 'OK';
+        http_response_code(405);
+        echo 'Method Not Allowed';
     }
 
-    /* -------- Заголовки в нижнем регистре (кроссплатформенно) -------- */
+
+
+    /** Вспомогательный метод (не используется напрямую, оставлен как справочный) */
     private function getAllHeadersLowercase(): array
     {
         if (function_exists('getallheaders')) {
             $raw = getallheaders();
             $out = [];
-            foreach ($raw as $k => $v) { $out[strtolower($k)] = $v; }
+            foreach ($raw as $k => $v) $out[strtolower($k)] = $v;
             return $out;
         }
         $out = [];
@@ -411,7 +544,7 @@ final class PaytrailSystem
                 $out[$k] = $value;
             }
         }
-        if (isset($_SERVER['CONTENT_TYPE']))   $out['content-type']   = $_SERVER['CONTENT_TYPE'];
+        if (isset($_SERVER['CONTENT_TYPE']))   $out['content-type'] = $_SERVER['CONTENT_TYPE'];
         if (isset($_SERVER['CONTENT_LENGTH'])) $out['content-length'] = $_SERVER['CONTENT_LENGTH'];
         return $out;
     }
@@ -425,21 +558,18 @@ final class App
     public static function run(): void
     {
         $action = $_GET['action'] ?? 'create';
-        $sys = new App\PaytrailSystem();
+        $sys = new PaytrailSystem();
 
         switch ($action) {
             case 'success':
                 $sys->renderSuccessOrCancel('success');
                 break;
-
             case 'cancel':
                 $sys->renderSuccessOrCancel('cancel');
                 break;
-
             case 'callback':
                 $sys->handleCallback();
                 break;
-
             case 'create':
             default:
                 $sys->createAndRedirect();
@@ -449,4 +579,4 @@ final class App
 }
 
 /* ======= Точка входа ======= */
-App\App::run();
+\App\App::run();
