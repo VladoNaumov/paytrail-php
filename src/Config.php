@@ -20,20 +20,10 @@ final class Config
     public const MERCHANT_ID       = 375917;
     public const SECRET_KEY        = 'SAIPPUAKAUPPIAS';
     public const PAYTRAIL_ENDPOINT = 'https://services.paytrail.com/payments';
-
-    // базовый URL с demo
     public const FORCE_BASE_URL    = 'https://www.encanta.fi/payment';
-
-    // домен
     public const YOUR_DOMAIN       = 'encanta.fi';
-
-    // путь приложения (оставляем demo)
     public const APP_PATH          = '/payment';
-
-    // куда возвращать пользователя после отмены/успеха
     public const BACK_URL          = 'https://encanta.fi/';
-
-    // логирование
     public const LOG_FILE          = __DIR__ . '/paytrail.log';
     public const DEBUG_LOGS        = true;
 
