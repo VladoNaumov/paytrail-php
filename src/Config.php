@@ -2,9 +2,9 @@
 declare(strict_types=1);
 
 namespace App;
+
 final class Config
 {
-
     /*
     public const MERCHANT_ID = 375917;
     public const SECRET_KEY = 'SAIPPUAKAUPPIAS';
@@ -20,13 +20,17 @@ final class Config
     public const MERCHANT_ID       = 375917;
     public const SECRET_KEY        = 'SAIPPUAKAUPPIAS';
     public const PAYTRAIL_ENDPOINT = 'https://services.paytrail.com/payments';
-    public const FORCE_BASE_URL    = 'https://www.encanta.fi/payment';
+
+    // Базовый URL приложения (жёстко задан — удобно на хостинге)
+    public const FORCE_BASE_URL    = 'https://artstylebyelandgl.com/payment';
+
+    // Запасные значения, если FORCE_BASE_URL пуст
     public const YOUR_DOMAIN       = 'encanta.fi';
     public const APP_PATH          = '/payment';
-    public const BACK_URL          = 'https://encanta.fi/';
+
+    public const BACK_URL          = 'https://artstylebyelandgl.com/';
     public const LOG_FILE          = __DIR__ . '/paytrail.log';
     public const DEBUG_LOGS        = true;
-
 
     public static function baseUrl(): string
     {
