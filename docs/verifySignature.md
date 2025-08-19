@@ -328,5 +328,5 @@ if (!$verifier->verifyCallback($hdr, $raw)) {
 
 ```
 
-если хочешь, сгенерю тебе эту памятку как **PDF/MD-файл** или вынесу код в отдельные файлы (helper + middleware + controller), чтобы сразу вставить в проект.
 ```
+
