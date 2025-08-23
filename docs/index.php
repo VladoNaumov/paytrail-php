@@ -449,26 +449,6 @@ final class PaytrailSystem
         http_response_code(400);
         echo 'ERR';
     }
-
-    private function getAllHeadersLowercase(): array
-    {
-        if (function_exists('getallheaders')) {
-            $raw = getallheaders();
-            $out = [];
-            foreach ($raw as $k => $v) $out[strtolower($k)] = $v;
-            return $out;
-        }
-        $out = [];
-        foreach ($_SERVER as $name => $value) {
-            if (str_starts_with($name, 'HTTP_')) {
-                $k = strtolower(str_replace('_', '-', substr($name, 5)));
-                $out[$k] = $value;
-            }
-        }
-        if (isset($_SERVER['CONTENT_TYPE']))   $out['content-type'] = $_SERVER['CONTENT_TYPE'];
-        if (isset($_SERVER['CONTENT_LENGTH'])) $out['content-length'] = $_SERVER['CONTENT_LENGTH'];
-        return $out;
-    }
 }
 
 final class App
